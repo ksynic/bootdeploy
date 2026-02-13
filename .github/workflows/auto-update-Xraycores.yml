@@ -3,7 +3,7 @@ name: Auto Update Xray Core (Multi-Platform)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "20 */6 * * *" # 每 6 小时（UTC）
+    - cron: "20 */6 * * *"
 
 permissions:
   contents: write
@@ -11,35 +11,6 @@ permissions:
 jobs:
   update:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - id: linux-amd64
-            asset_regex: '^Xray-.*linux.*64.*\.zip$'
-            bin_name: 'xray'
-            out_path: 'cores/linux-amd64/xray'
-          - id: linux-arm64
-            asset_regex: '^Xray-.*linux.*(arm64|aarch64).*\.zip$'
-            bin_name: 'xray'
-            out_path: 'cores/linux-arm64/xray'
-          - id: darwin-amd64
-            asset_regex: '^Xray-.*darwin.*64.*\.zip$'
-            bin_name: 'xray'
-            out_path: 'cores/darwin-amd64/xray'
-          - id: darwin-arm64
-            asset_regex: '^Xray-.*darwin.*(arm64|aarch64).*\.zip$'
-            bin_name: 'xray'
-            out_path: 'cores/darwin-arm64/xray'
-          - id: windows-amd64
-            asset_regex: '^Xray-.*windows.*64.*\.zip$'
-            bin_name: 'xray.exe'
-            out_path: 'cores/windows-amd64/xray.exe'
-          - id: windows-arm64
-            asset_regex: '^Xray-.*windows.*(arm64|aarch64).*\.zip$'
-            bin_name: 'xray.exe'
-            out_path: 'cores/windows-arm64/xray.exe'
-
     steps:
       - uses: actions/checkout@v4
 
@@ -48,69 +19,86 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y jq unzip
 
-      - name: Fetch latest release
+      - name: Fetch latest release + compare
         id: rel
         run: |
           set -euo pipefail
           json="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest)"
           tag="$(echo "$json" | jq -r '.tag_name')"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "$json" > release.json
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-      - name: Check if update needed (once)
-        id: cmp
-        run: |
-          set -euo pipefail
-          latest="${{ steps.rel.outputs.tag }}"
           current="none"
           [[ -f VERSION ]] && current="$(tr -d ' \n\r' < VERSION)"
           echo "current=$current"
-          echo "latest=$latest"
-          [[ "$current" == "$latest" ]] && echo "need=false" >> "$GITHUB_OUTPUT" || echo "need=true" >> "$GITHUB_OUTPUT"
+          echo "latest=$tag"
+          [[ "$current" == "$tag" ]] && echo "need=false" >> "$GITHUB_OUTPUT" || echo "need=true" >> "$GITHUB_OUTPUT"
 
-      - name: Download & extract for target
-        if: steps.cmp.outputs.need == 'true'
+      - name: Update all targets
+        if: steps.rel.outputs.need == 'true'
         run: |
           set -euo pipefail
 
-          regex='${{ matrix.target.asset_regex }}'
-          url="$(jq -r --arg re "$regex" '.assets[] | select(.name|test($re)) | .browser_download_url' release.json | head -n 1)"
+          declare -A REGEX BIN OUT
+          REGEX[linux-amd64]='^Xray-.*linux.*64.*\.zip$'
+          BIN[linux-amd64]='xray'
+          OUT[linux-amd64]='cores/linux-amd64/xray'
 
-          if [[ -z "${url:-}" || "$url" == "null" ]]; then
-            echo "❌ 未匹配到资产：$regex"
-            echo "可用资产："
-            jq -r '.assets[].name' release.json
-            exit 1
-          fi
+          REGEX[linux-arm64]='^Xray-.*linux.*(arm64|aarch64).*\.zip$'
+          BIN[linux-arm64]='xray'
+          OUT[linux-arm64]='cores/linux-arm64/xray'
 
-          rm -rf tmp && mkdir -p tmp
-          mkdir -p "$(dirname '${{ matrix.target.out_path }}')"
+          REGEX[darwin-amd64]='^Xray-.*darwin.*64.*\.zip$'
+          BIN[darwin-amd64]='xray'
+          OUT[darwin-amd64]='cores/darwin-amd64/xray'
 
-          curl -fL "$url" -o tmp/core.zip
-          unzip -o tmp/core.zip -d tmp/unz
+          REGEX[darwin-arm64]='^Xray-.*darwin.*(arm64|aarch64).*\.zip$'
+          BIN[darwin-arm64]='xray'
+          OUT[darwin-arm64]='cores/darwin-arm64/xray'
 
-          # 在 zip 里找对应二进制（层级可能变化，用 find 更稳）
-          bin="$(find tmp/unz -type f -name '${{ matrix.target.bin_name }}' | head -n 1)"
-          if [[ -z "${bin:-}" ]]; then
-            echo "❌ zip 内找不到：${{ matrix.target.bin_name }}"
-            find tmp/unz -maxdepth 3 -type f
-            exit 1
-          fi
+          REGEX[windows-amd64]='^Xray-.*windows.*64.*\.zip$'
+          BIN[windows-amd64]='xray.exe'
+          OUT[windows-amd64]='cores/windows-amd64/xray.exe'
 
-          install -m 0755 "$bin" '${{ matrix.target.out_path }}'
+          REGEX[windows-arm64]='^Xray-.*windows.*(arm64|aarch64).*\.zip$'
+          BIN[windows-arm64]='xray.exe'
+          OUT[windows-arm64]='cores/windows-arm64/xray.exe'
 
-      - name: Update VERSION (only once per job; safe to repeat)
-        if: steps.cmp.outputs.need == 'true'
-        run: |
+          mkdir -p tmp
+
+          for id in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64 windows-arm64; do
+            echo "==> Updating $id"
+            rm -rf tmp/*
+
+            regex="${REGEX[$id]}"
+            url="$(jq -r --arg re "$regex" '.assets[] | select(.name|test($re)) | .browser_download_url' release.json | head -n 1)"
+            if [[ -z "${url:-}" || "$url" == "null" ]]; then
+              echo "❌ 未匹配到资产：$regex"
+              echo "可用资产："
+              jq -r '.assets[].name' release.json
+              exit 1
+            fi
+
+            curl -fL "$url" -o tmp/core.zip
+            unzip -o tmp/core.zip -d tmp/unz
+
+            bin_name="${BIN[$id]}"
+            bin="$(find tmp/unz -type f -name "$bin_name" | head -n 1)"
+            [[ -z "${bin:-}" ]] && (echo "❌ zip 内找不到：$bin_name"; find tmp/unz -maxdepth 3 -type f; exit 1)
+
+            out="${OUT[$id]}"
+            mkdir -p "$(dirname "$out")"
+            install -m 0755 "$bin" "$out"
+          done
+
           echo "${{ steps.rel.outputs.tag }}" > VERSION
 
-      - name: Commit & push (only once, after all matrix runs)
-        if: steps.cmp.outputs.need == 'true'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            // 这个 step 在每个 matrix 都会跑一次；我们用“只在最后一个目标提交”的技巧避免冲突：
-            // 依赖目标数固定时不稳，所以更简单：让每个 matrix 只写文件，不提交；
-            // 然后改成单 job 非 matrix 方案会更优。
-            // —— 这里先直接让每个 matrix 不提交，下面我给你更稳的“单 job + 循环”版本。
-            core.setFailed("请使用下方更稳的『单 job + 循环』版本（避免 matrix 并发写同一仓库冲突）。")
+      - name: Commit & push
+        if: steps.rel.outputs.need == 'true'
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add cores VERSION
+          git commit -m "chore: update xray core to ${{ steps.rel.outputs.tag }}" || exit 0
+          git push
