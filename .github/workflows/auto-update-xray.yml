@@ -1,1 +1,103 @@
+name: Auto Update Xray (to Xraycore/)
 
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "35 */6 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq unzip
+
+      - name: Fetch latest release
+        id: rel
+        run: |
+          set -euo pipefail
+          json="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest)"
+          tag="$(echo "$json" | jq -r '.tag_name')"
+          echo "$json" > release.json
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+          current="none"
+          [[ -f Xraycore/VERSION ]] && current="$(tr -d ' \n\r' < Xraycore/VERSION)"
+          echo "current=$current"
+          echo "latest=$tag"
+
+          if [[ "$current" == "$tag" ]]; then
+            echo "need=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "need=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Update cores
+        if: steps.rel.outputs.need == 'true'
+        run: |
+          set -euo pipefail
+
+          declare -A ASSET BIN OUT
+
+          ASSET[linux-amd64]='Xray-linux-64.zip'
+          BIN[linux-amd64]='xray'
+          OUT[linux-amd64]='Xraycore/cores/linux-amd64/xray'
+
+          ASSET[linux-arm64]='Xray-linux-arm64-v8a.zip'
+          BIN[linux-arm64]='xray'
+          OUT[linux-arm64]='Xraycore/cores/linux-arm64/xray'
+
+          ASSET[darwin-amd64]='Xray-macos-64.zip'
+          BIN[darwin-amd64]='xray'
+          OUT[darwin-amd64]='Xraycore/cores/darwin-amd64/xray'
+
+          ASSET[darwin-arm64]='Xray-macos-arm64-v8a.zip'
+          BIN[darwin-arm64]='xray'
+          OUT[darwin-arm64]='Xraycore/cores/darwin-arm64/xray'
+
+          ASSET[windows-amd64]='Xray-windows-64.zip'
+          BIN[windows-amd64]='xray.exe'
+          OUT[windows-amd64]='Xraycore/cores/windows-amd64/xray.exe'
+
+          ASSET[windows-arm64]='Xray-windows-arm64-v8a.zip'
+          BIN[windows-arm64]='xray.exe'
+          OUT[windows-arm64]='Xraycore/cores/windows-arm64/xray.exe'
+
+          rm -rf tmp && mkdir -p tmp
+
+          for id in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64 windows-arm64; do
+            echo "Updating $id"
+            rm -rf tmp/*
+
+            url="$(jq -r --arg name "${ASSET[$id]}" '.assets[] | select(.name==$name) | .browser_download_url' release.json | head -n 1)"
+            [[ -z "$url" || "$url" == "null" ]] && (echo "Asset not found"; exit 1)
+
+            curl -fL "$url" -o tmp/core.zip
+            unzip -o tmp/core.zip -d tmp/unz
+
+            bin="$(find tmp/unz -type f -name "${BIN[$id]}" | head -n 1)"
+            [[ -z "$bin" ]] && (echo "Binary not found"; exit 1)
+
+            mkdir -p "$(dirname "${OUT[$id]}")"
+            install -m 0755 "$bin" "${OUT[$id]}"
+          done
+
+          echo "${{ steps.rel.outputs.tag }}" > Xraycore/VERSION
+
+      - name: Commit & push
+        if: steps.rel.outputs.need == 'true'
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email github-actions[bot]@users.noreply.github.com
+          git add Xraycore
+          git commit -m "chore(xray): update to ${{ steps.rel.outputs.tag }}" || exit 0
+          git pull --rebase origin main
+          git push
