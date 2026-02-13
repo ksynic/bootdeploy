@@ -1,104 +1,56 @@
-name: Auto Update Xray Core (Multi-Platform)
+set -euo pipefail
 
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: "20 */6 * * *"
+declare -A REGEX BIN OUT
 
-permissions:
-  contents: write
+REGEX[linux-amd64]='^Xray-linux-64\.zip$'
+BIN[linux-amd64]='xray'
+OUT[linux-amd64]='cores/linux-amd64/xray'
 
-jobs:
-  update:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+REGEX[linux-arm64]='^Xray-linux-arm64-v8a\.zip$'
+BIN[linux-arm64]='xray'
+OUT[linux-arm64]='cores/linux-arm64/xray'
 
-      - name: Install deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y jq unzip
+REGEX[macos-amd64]='^Xray-macos-64\.zip$'
+BIN[macos-amd64]='xray'
+OUT[macos-amd64]='cores/darwin-amd64/xray'   # 你想改名就改成 cores/macos-amd64/xray
 
-      - name: Fetch latest release + compare
-        id: rel
-        run: |
-          set -euo pipefail
-          json="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest)"
-          tag="$(echo "$json" | jq -r '.tag_name')"
-          echo "$json" > release.json
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+REGEX[macos-arm64]='^Xray-macos-arm64-v8a\.zip$'
+BIN[macos-arm64]='xray'
+OUT[macos-arm64]='cores/darwin-arm64/xray'   # 同上
 
-          current="none"
-          [[ -f VERSION ]] && current="$(tr -d ' \n\r' < VERSION)"
-          echo "current=$current"
-          echo "latest=$tag"
-          [[ "$current" == "$tag" ]] && echo "need=false" >> "$GITHUB_OUTPUT" || echo "need=true" >> "$GITHUB_OUTPUT"
+REGEX[windows-amd64]='^Xray-windows-64\.zip$'
+BIN[windows-amd64]='xray.exe'
+OUT[windows-amd64]='cores/windows-amd64/xray.exe'
 
-      - name: Update all targets
-        if: steps.rel.outputs.need == 'true'
-        run: |
-          set -euo pipefail
+REGEX[windows-arm64]='^Xray-windows-arm64-v8a\.zip$'
+BIN[windows-arm64]='xray.exe'
+OUT[windows-arm64]='cores/windows-arm64/xray.exe'
 
-          declare -A REGEX BIN OUT
-          REGEX[linux-amd64]='^Xray-.*linux.*64.*\.zip$'
-          BIN[linux-amd64]='xray'
-          OUT[linux-amd64]='cores/linux-amd64/xray'
+mkdir -p tmp
 
-          REGEX[linux-arm64]='^Xray-.*linux.*(arm64|aarch64).*\.zip$'
-          BIN[linux-arm64]='xray'
-          OUT[linux-arm64]='cores/linux-arm64/xray'
+for id in linux-amd64 linux-arm64 macos-amd64 macos-arm64 windows-amd64 windows-arm64; do
+  echo "==> Updating $id"
+  rm -rf tmp/*
 
-          REGEX[darwin-amd64]='^Xray-.*darwin.*64.*\.zip$'
-          BIN[darwin-amd64]='xray'
-          OUT[darwin-amd64]='cores/darwin-amd64/xray'
+  regex="${REGEX[$id]}"
+  url="$(jq -r --arg re "$regex" '.assets[] | select(.name|test($re)) | .browser_download_url' release.json | head -n 1)"
 
-          REGEX[darwin-arm64]='^Xray-.*darwin.*(arm64|aarch64).*\.zip$'
-          BIN[darwin-arm64]='xray'
-          OUT[darwin-arm64]='cores/darwin-arm64/xray'
+  if [[ -z "${url:-}" || "$url" == "null" ]]; then
+    echo "⚠️ Skip $id: 未匹配到资产：$regex"
+    continue
+  fi
 
-          REGEX[windows-amd64]='^Xray-.*windows.*64.*\.zip$'
-          BIN[windows-amd64]='xray.exe'
-          OUT[windows-amd64]='cores/windows-amd64/xray.exe'
+  curl -fL "$url" -o tmp/core.zip
+  unzip -o tmp/core.zip -d tmp/unz
 
-          REGEX[windows-arm64]='^Xray-.*windows.*(arm64|aarch64).*\.zip$'
-          BIN[windows-arm64]='xray.exe'
-          OUT[windows-arm64]='cores/windows-arm64/xray.exe'
+  bin_name="${BIN[$id]}"
+  bin="$(find tmp/unz -type f -name "$bin_name" | head -n 1)"
+  if [[ -z "${bin:-}" ]]; then
+    echo "⚠️ Skip $id: zip 内找不到 $bin_name"
+    continue
+  fi
 
-          mkdir -p tmp
-
-          for id in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64 windows-arm64; do
-            echo "==> Updating $id"
-            rm -rf tmp/*
-
-            regex="${REGEX[$id]}"
-            url="$(jq -r --arg re "$regex" '.assets[] | select(.name|test($re)) | .browser_download_url' release.json | head -n 1)"
-            if [[ -z "${url:-}" || "$url" == "null" ]]; then
-              echo "❌ 未匹配到资产：$regex"
-              echo "可用资产："
-              jq -r '.assets[].name' release.json
-              exit 1
-            fi
-
-            curl -fL "$url" -o tmp/core.zip
-            unzip -o tmp/core.zip -d tmp/unz
-
-            bin_name="${BIN[$id]}"
-            bin="$(find tmp/unz -type f -name "$bin_name" | head -n 1)"
-            [[ -z "${bin:-}" ]] && (echo "❌ zip 内找不到：$bin_name"; find tmp/unz -maxdepth 3 -type f; exit 1)
-
-            out="${OUT[$id]}"
-            mkdir -p "$(dirname "$out")"
-            install -m 0755 "$bin" "$out"
-          done
-
-          echo "${{ steps.rel.outputs.tag }}" > VERSION
-
-      - name: Commit & push
-        if: steps.rel.outputs.need == 'true'
-        run: |
-          set -euo pipefail
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add cores VERSION
-          git commit -m "chore: update xray core to ${{ steps.rel.outputs.tag }}" || exit 0
-          git push
+  out="${OUT[$id]}"
+  mkdir -p "$(dirname "$out")"
+  install -m 0755 "$bin" "$out"
+done
