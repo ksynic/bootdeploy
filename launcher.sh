@@ -1,28 +1,35 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ---- terminal safety ----
 export TERM="${TERM:-xterm-256color}"
 
-# ---- colors ----
-CYN='\033[0;36m'
-GRN='\033[0;32m'
-YEL='\033[0;33m'
-RED='\033[0;31m'
-BLU='\033[0;34m'
-MAG='\033[0;35m'
-WHT='\033[1;37m'
-DIM='\033[2m'
-BOLD='\033[1m'
-NC='\033[0m'
+# ---------------- color & tty ----------------
+supports_color() {
+  [[ -t 1 ]] || return 1
+  [[ "${TERM:-}" != "dumb" ]] || return 1
+  command -v tput >/dev/null 2>&1 || return 1
+  [[ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]]
+}
 
-# ---- ui helpers ----
+if supports_color; then
+  BLU=$'\033[0;34m'
+  CYN=$'\033[0;36m'
+  GRN=$'\033[0;32m'
+  YEL=$'\033[0;33m'
+  RED=$'\033[0;31m'
+  MAG=$'\033[0;35m'
+  WHT=$'\033[1;37m'
+  DIM=$'\033[2m'
+  BOLD=$'\033[1m'
+  REV=$'\033[7m'
+  NC=$'\033[0m'
+else
+  BLU=""; CYN=""; GRN=""; YEL=""; RED=""; MAG=""; WHT=""; DIM=""; BOLD=""; REV=""; NC=""
+fi
+
 hr(){ printf "${CYN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"; }
-ok(){ printf "${GRN}✅ %s${NC}\n" "$*"; }
-warn(){ printf "${YEL}⚠️  %s${NC}\n" "$*"; }
-err(){ printf "${RED}❌ %s${NC}\n" "$*"; }
-info(){ printf "${BLU}ℹ️  %s${NC}\n" "$*"; }
 pause(){ read -r -p "$(printf "${DIM}按回车继续...${NC}")" _ < /dev/tty; }
+die(){ printf "${RED}❌ %s${NC}\n" "$*"; exit 1; }
 
 center_line() {
   local s="$1"
@@ -35,8 +42,8 @@ center_line() {
 
 need_root_hint() {
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
-    warn "建议使用 root/sudo 运行安装项（写 /etc、装服务、开端口常需要权限）"
-    info "例如：sudo bash <(curl -fsSL https://raw.githubusercontent.com/ksynic/bootdeploy/main/launcher.sh)"
+    printf "${YEL}⚠️  建议使用 root/sudo 运行安装项（写 /etc、装服务、开端口）${NC}\n"
+    printf "${BLU}ℹ️  例如：sudo bash <(curl -fsSL https://raw.githubusercontent.com/ksynic/bootdeploy/main/launcher.sh)${NC}\n"
     hr
   fi
 }
@@ -53,71 +60,174 @@ run_remote() {
   hr
 
   if ! curl -fsSL -o "$tmp" "$url"; then
-    err "下载失败：$url"
-    warn "可能原因：网络/DNS/被拦截/URL 不存在"
+    printf "${RED}❌ 下载失败：%s${NC}\n" "$url"
     pause
     return 1
   fi
 
   chmod +x "$tmp" || true
 
-  info "开始执行脚本..."
   if bash "$tmp"; then
-    ok "完成：$label"
     rm -f "$tmp" || true
+    hr
+    printf "${GRN}✅ 完成：%s${NC}\n" "$label"
     pause
     return 0
   else
     local rc=$?
-    err "失败：$label（退出码 $rc）"
     rm -f "$tmp" || true
+    hr
+    printf "${RED}❌ 失败：%s（退出码 %d）${NC}\n" "$label" "$rc"
     pause
     return "$rc"
   fi
 }
 
-draw_menu() {
+# ---------------- TUI ----------------
+cleanup() {
+  stty echo 2>/dev/null || true
+  tput cnorm 2>/dev/null || true
+}
+trap cleanup EXIT
+
+# items: "title|color|action"
+# action = "remote:<path>" or "msg:<text>" or "exit"
+MENU_ITEMS=(
+  "AlpineXray 安装|GRN|remote:AlpineXray/install.sh"
+  "Alpine sing-box 安装|GRN|remote:AlpineSingbox/install.sh"
+  "DebianXray 安装|GRN|remote:DebianXray/install.sh"
+  "Debian sing-box 安装|GRN|remote:DebianSingbox/install.sh"
+  "一键卸载（占位）|YEL|msg:卸载暂未实现：建议新增 uninstall.sh 或在各 install.sh 内实现。"
+  "还原 VPS（占位）|YEL|msg:还原/清理暂未实现：更推荐云厂商快照恢复；如需安全清理脚本可再加。"
+  "退出|RED|exit"
+)
+
+render_menu() {
+  local selected="$1"
   clear >/dev/null 2>&1 || true
   hr
-  center_line "${BOLD}${MAG}BootDeploy${NC} ${DIM}· 远程执行版（不 clone/pull）${NC}"
+  center_line "${BOLD}${MAG}BootDeploy${NC} ${DIM}· 专业运维面板（↑↓ 选择 / Enter 执行 / q 退出）${NC}"
   hr
-  printf "${WHT}  1.${NC} ${GRN}AlpineXray 安装${NC}\n"
-  printf "${WHT}  2.${NC} ${GRN}Alpine sing-box 安装${NC}\n"
-  printf "${WHT}  3.${NC} ${GRN}DebianXray 安装${NC}\n"
-  printf "${WHT}  4.${NC} ${GRN}Debian sing-box 安装${NC}\n"
-  printf "${WHT}  5.${NC} ${YEL}一键卸载（占位）${NC}\n"
-  printf "${WHT}  6.${NC} ${YEL}还原 VPS（占位）${NC}\n"
-  printf "\n"
-  printf "${WHT}  0.${NC} ${RED}退出${NC}\n"
+
+  printf "${DIM}提示：脚本将从 GitHub 拉取 install.sh 并在本机执行（不 clone/pull）。${NC}\n"
+  printf "${DIM}当前主机：$(hostname) · 用户：$(whoami) · 时间：$(date '+%F %T')${NC}\n"
   hr
+
+  local i=0
+  for item in "${MENU_ITEMS[@]}"; do
+    IFS='|' read -r title color _action <<<"$item"
+    local num=$((i+1))
+
+    # resolve color var name
+    local c=""
+    case "$color" in
+      GRN) c="$GRN" ;;
+      YEL) c="$YEL" ;;
+      RED) c="$RED" ;;
+      *) c="$NC" ;;
+    esac
+
+    if [[ "$i" -eq "$selected" ]]; then
+      printf "  ${REV}${BOLD}${BLU}%2d.${NC}${REV} %s%s${NC}${REV} ${NC}\n" "$num" "$c" "$title"
+    else
+      printf "  ${BOLD}${BLU}%2d.${NC} %s%s${NC}\n" "$num" "$c" "$title"
+    fi
+    i=$((i+1))
+  done
+
+  hr
+  printf "${DIM}操作：↑/↓ 或 j/k 选择 · Enter 执行 · q 退出${NC}\n"
 }
 
-while true; do
-  draw_menu
-  read -r -p "$(printf "${BOLD}输入选项${NC} ${DIM}(0-6)${NC}: ")" choice < /dev/tty
+get_key() {
+  # read one key from /dev/tty
+  local k
+  IFS= read -rsn1 k < /dev/tty || return 1
 
-  case "${choice,,}" in
-    1) need_root_hint; run_remote "AlpineXray 安装" "AlpineXray/install.sh" ;;
-    2) need_root_hint; run_remote "Alpine sing-box 安装" "AlpineSingbox/install.sh" ;;
-    3) need_root_hint; run_remote "DebianXray 安装" "DebianXray/install.sh" ;;
-    4) need_root_hint; run_remote "Debian sing-box 安装" "DebianSingbox/install.sh" ;;
-    5)
+  # arrow keys are escape sequences: \x1b [ A/B
+  if [[ "$k" == $'\x1b' ]]; then
+    local k2 k3
+    IFS= read -rsn1 k2 < /dev/tty || true
+    IFS= read -rsn1 k3 < /dev/tty || true
+    printf "%s" "$k$k2$k3"
+    return 0
+  fi
+
+  printf "%s" "$k"
+}
+
+do_action() {
+  local idx="$1"
+  IFS='|' read -r title _color action <<<"${MENU_ITEMS[$idx]}"
+
+  case "$action" in
+    remote:*)
       need_root_hint
-      warn "卸载暂未实现：建议新增 uninstall.sh 或在各 install.sh 内实现卸载逻辑。"
+      run_remote "$title" "${action#remote:}"
+      ;;
+    msg:*)
+      hr
+      printf "${YEL}%s${NC}\n" "${action#msg:}"
       pause
       ;;
-    6)
-      need_root_hint
-      warn "还原/清理暂未实现：更推荐云厂商快照恢复；如需安全清理脚本可再加。"
-      pause
-      ;;
-    0|q|quit|exit)
-      ok "已退出。"
+    exit)
+      hr
+      printf "${GRN}✅ 已退出。${NC}\n"
       exit 0
       ;;
     *)
-      err "无效选项：$choice"
-      pause
+      die "未知 action：$action"
       ;;
   esac
-done
+}
+
+main() {
+  [[ -t 0 || -t 1 ]] || die "当前不是交互终端，无法显示面板。请直接在 SSH 终端运行。"
+
+  tput civis 2>/dev/null || true
+  stty -echo 2>/dev/null || true
+
+  local selected=0
+  local max=$(( ${#MENU_ITEMS[@]} - 1 ))
+
+  while true; do
+    render_menu "$selected"
+
+    local key
+    key="$(get_key)" || true
+
+    case "$key" in
+      $'\x1b[A'|k) # up
+        selected=$((selected-1))
+        (( selected < 0 )) && selected=$max
+        ;;
+      $'\x1b[B'|j) # down
+        selected=$((selected+1))
+        (( selected > max )) && selected=0
+        ;;
+      "") # Enter
+        # restore echo for running scripts
+        stty echo 2>/dev/null || true
+        tput cnorm 2>/dev/null || true
+        do_action "$selected"
+        # hide cursor again
+        tput civis 2>/dev/null || true
+        stty -echo 2>/dev/null || true
+        ;;
+      q|Q)
+        do_action "$max" # exit item
+        ;;
+      [1-9])
+        # quick jump by number
+        local n=$((key-1))
+        if (( n >= 0 && n <= max )); then
+          selected="$n"
+        fi
+        ;;
+      *)
+        : ;;
+    esac
+  done
+}
+
+main
