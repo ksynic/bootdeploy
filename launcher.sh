@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ===== 配置 =====
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
-GLOB_PATTERN="*.sh"
 SELF_NAME="$(basename "$0")"
+GLOB_PATTERN="*.sh"
 
-# ===== 颜色（终端支持就会显示）=====
+# 颜色（终端支持就显示）
 if [[ -t 1 ]]; then
   RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[0;33m'
   BLUE=$'\033[0;34m'; MAGENTA=$'\033[0;35m'; CYAN=$'\033[0;36m'
@@ -18,19 +17,29 @@ fi
 hr() { printf "%s\n" "------------------------------------------------------------"; }
 pause() { read -r -p "按回车继续..." _; }
 
-# 从脚本里提取描述：使用一行注释 `# DESC: xxxx`
 get_desc() {
   local file="$1"
-  local desc
+  local desc=""
   desc="$(grep -m1 -E '^[[:space:]]*#\s*DESC:' "$file" 2>/dev/null | sed -E 's/^[[:space:]]*#\s*DESC:\s*//')"
   [[ -n "${desc:-}" ]] && echo "$desc" || echo "（无描述，可在脚本里加：# DESC: ...）"
 }
 
-# 收集脚本列表（排除 menu.sh 自己）
+# ✅ 不用 < <(...)，避免 /dev/fd 依赖
 load_scripts() {
-  mapfile -t SCRIPTS < <(find "$SCRIPTS_DIR" -maxdepth 1 -type f -name "$GLOB_PATTERN" -printf "%f\n" \
-    | sort \
-    | grep -v -x "$SELF_NAME")
+  SCRIPTS=()
+  # 用 find + sort，然后 while read 收集到数组
+  # -print0 / read -d '' 更安全（文件名含空格），但 mac 的 bash 3.2 对 read -d 支持也OK
+  while IFS= read -r script; do
+    [[ "$script" == "$SELF_NAME" ]] && continue
+    SCRIPTS+=("$script")
+  done < <(find "$SCRIPTS_DIR" -maxdepth 1 -type f -name "$GLOB_PATTERN" -printf "%f\n" 2>/dev/null | sort)
+
+  # 如果你的环境 find 不支持 -printf（比如 macOS 默认 find），用下面替代（取消注释即可）：
+  # while IFS= read -r path; do
+  #   script="$(basename "$path")"
+  #   [[ "$script" == "$SELF_NAME" ]] && continue
+  #   SCRIPTS+=("$script")
+  # done < <(find "$SCRIPTS_DIR" -maxdepth 1 -type f -name "$GLOB_PATTERN" 2>/dev/null | sort)
 }
 
 run_script() {
@@ -42,6 +51,7 @@ run_script() {
     return 1
   fi
 
+  # 自动加执行权限（对本次运行有效；要持久化到 Git 需要 git update-index）
   if [[ ! -x "$path" ]]; then
     chmod +x "$path" || true
   fi
@@ -49,7 +59,6 @@ run_script() {
   echo "${CYAN}▶ 执行：${BOLD}$script${RESET}"
   echo "${DIM}路径：$path${RESET}"
   hr
-  # 用 bash 执行更稳（不依赖 shebang 是否正确）
   bash "$path"
   hr
   echo "${GREEN}✅ 完成：$script${RESET}"
@@ -76,7 +85,6 @@ while true; do
 
   if (( ${#SCRIPTS[@]} == 0 )); then
     echo "${YELLOW}⚠️ 当前目录没有可执行脚本（*.sh）。${RESET}"
-    echo "把脚本放到：$SCRIPTS_DIR"
     hr
     echo "0) 退出"
     read -r -p "请输入选项: " choice
@@ -84,7 +92,6 @@ while true; do
     continue
   fi
 
-  # 显示脚本列表
   for i in "${!SCRIPTS[@]}"; do
     idx=$((i+1))
     script="${SCRIPTS[$i]}"
