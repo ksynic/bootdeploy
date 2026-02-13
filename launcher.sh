@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 解决部分环境下 clear/tput 导致 set -e 直接退出
+# 兼容部分终端环境
 export TERM="${TERM:-xterm-256color}"
 
 CYN='\033[0;36m'
@@ -62,8 +62,6 @@ while true; do
   printf "  2. Alpine sing-box 安装\n"
   printf "  3. DebianXray 安装\n"
   printf "  4. Debian sing-box 安装\n"
-  printf "  5. 一键卸载 Xray/sing-box（待实现）\n"
-  printf "  6. 还原 VPS（安全清理版）（待实现）\n"
   printf "  0. 退出\n"
   hr
 
@@ -74,16 +72,6 @@ while true; do
     2) need_root_hint; run_remote "Alpine sing-box 安装" "AlpineSingbox/install.sh" ;;
     3) need_root_hint; run_remote "DebianXray 安装" "DebianXray/install.sh" ;;
     4) need_root_hint; run_remote "Debian sing-box 安装" "DebianSingbox/install.sh" ;;
-    5)
-      need_root_hint
-      echo "TODO：卸载逻辑建议单独写 uninstall.sh 或在各 install.sh 内实现。"
-      pause
-      ;;
-    6)
-      need_root_hint
-      echo "TODO：建议用云厂商快照恢复；如需安全清理脚本可再加选项实现。"
-      pause
-      ;;
     0|q|quit|exit) exit 0 ;;
     *)
       printf "${RED}无效选项：%s${NC}\n" "$choice"
