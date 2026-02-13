@@ -1,14 +1,127 @@
-      - name: Commit & push
+name: Auto Update Xray (to Xraycore/)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "35 */6 * * *"   # 与 sing-box 错开
+
+permissions:
+  contents: write
+
+concurrency:
+  group: core-updater-main
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq unzip
+
+      - name: Fetch latest release & compare
+        id: rel
+        run: |
+          set -euo pipefail
+
+          json="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest)"
+          tag="$(echo "$json" | jq -r '.tag_name')"
+
+          echo "$json" > release.json
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+          current="none"
+          if [[ -f Xraycore/VERSION ]]; then
+            current="$(tr -d ' \n\r' < Xraycore/VERSION)"
+          fi
+
+          echo "Current: $current"
+          echo "Latest : $tag"
+
+          if [[ "$current" == "$tag" ]]; then
+            echo "need=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "need=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Update all platforms
         if: steps.rel.outputs.need == 'true'
         run: |
           set -euo pipefail
+
+          declare -A ASSET BIN OUT
+
+          ASSET[linux-amd64]='Xray-linux-64.zip'
+          BIN[linux-amd64]='xray'
+          OUT[linux-amd64]='Xraycore/cores/linux-amd64/xray'
+
+          ASSET[linux-arm64]='Xray-linux-arm64-v8a.zip'
+          BIN[linux-arm64]='xray'
+          OUT[linux-arm64]='Xraycore/cores/linux-arm64/xray'
+
+          ASSET[darwin-amd64]='Xray-macos-64.zip'
+          BIN[darwin-amd64]='xray'
+          OUT[darwin-amd64]='Xraycore/cores/darwin-amd64/xray'
+
+          ASSET[darwin-arm64]='Xray-macos-arm64-v8a.zip'
+          BIN[darwin-arm64]='xray'
+          OUT[darwin-arm64]='Xraycore/cores/darwin-arm64/xray'
+
+          ASSET[windows-amd64]='Xray-windows-64.zip'
+          BIN[windows-amd64]='xray.exe'
+          OUT[windows-amd64]='Xraycore/cores/windows-amd64/xray.exe'
+
+          ASSET[windows-arm64]='Xray-windows-arm64-v8a.zip'
+          BIN[windows-arm64]='xray.exe'
+          OUT[windows-arm64]='Xraycore/cores/windows-arm64/xray.exe'
+
+          rm -rf tmp && mkdir -p tmp
+
+          for id in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64 windows-arm64; do
+            echo "==> Updating $id"
+            rm -rf tmp/*
+
+            url="$(jq -r --arg name "${ASSET[$id]}" \
+              '.assets[] | select(.name==$name) | .browser_download_url' release.json | head -n 1)"
+
+            if [[ -z "$url" || "$url" == "null" ]]; then
+              echo "❌ Asset not found for $id"
+              jq -r '.assets[].name' release.json
+              exit 1
+            fi
+
+            curl -fL "$url" -o tmp/core.zip
+            unzip -o tmp/core.zip -d tmp/unz
+
+            bin="$(find tmp/unz -type f -name "${BIN[$id]}" | head -n 1)"
+            if [[ -z "$bin" ]]; then
+              echo "❌ Binary not found inside archive"
+              exit 1
+            fi
+
+            mkdir -p "$(dirname "${OUT[$id]}")"
+            install -m 0755 "$bin" "${OUT[$id]}"
+          done
+
+          echo "${{ steps.rel.outputs.tag }}" > Xraycore/VERSION
+
+      - name: Commit & push (with retry protection)
+        if: steps.rel.outputs.need == 'true'
+        run: |
+          set -euo pipefail
+
           git config user.name github-actions[bot]
           git config user.email github-actions[bot]@users.noreply.github.com
 
           git add Xraycore
           git commit -m "chore(xray): update to ${{ steps.rel.outputs.tag }}" || exit 0
 
-          # ✅ 防并发：最多重试 8 次
+          # 防并发冲突自动重试
           for i in 1 2 3 4 5 6 7 8; do
             echo "Push attempt $i..."
             git fetch origin main
@@ -19,7 +132,7 @@
               exit 0
             fi
 
-            echo "⚠️ Push failed due to race; retrying..."
+            echo "⚠️ Push failed due to race, retrying..."
             sleep $((i*2))
           done
 
