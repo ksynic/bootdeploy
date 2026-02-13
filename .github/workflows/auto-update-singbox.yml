@@ -1,1 +1,126 @@
+name: Auto Update sing-box (to Singboxcore/)
 
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "20 */6 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq unzip
+
+      - name: Fetch latest release
+        id: rel
+        run: |
+          set -euo pipefail
+          json="$(curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest)"
+          tag="$(echo "$json" | jq -r '.tag_name')"
+          echo "$json" > release.json
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+          current="none"
+          [[ -f Singboxcore/VERSION ]] && current="$(tr -d ' \n\r' < Singboxcore/VERSION)"
+          echo "current=$current"
+          echo "latest=$tag"
+
+          if [[ "$current" == "$tag" ]]; then
+            echo "need=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "need=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Update cores
+        if: steps.rel.outputs.need == 'true'
+        run: |
+          set -euo pipefail
+
+          declare -A REGEX_TGZ REGEX_ZIP BIN OUT
+
+          BIN[linux-amd64]='sing-box'
+          OUT[linux-amd64]='Singboxcore/cores/linux-amd64/sing-box'
+          REGEX_TGZ[linux-amd64]='linux.*amd64.*\.tar\.gz$'
+          REGEX_ZIP[linux-amd64]='linux.*amd64.*\.zip$'
+
+          BIN[linux-arm64]='sing-box'
+          OUT[linux-arm64]='Singboxcore/cores/linux-arm64/sing-box'
+          REGEX_TGZ[linux-arm64]='linux.*(arm64|aarch64).*\.tar\.gz$'
+          REGEX_ZIP[linux-arm64]='linux.*(arm64|aarch64).*\.zip$'
+
+          BIN[darwin-amd64]='sing-box'
+          OUT[darwin-amd64]='Singboxcore/cores/darwin-amd64/sing-box'
+          REGEX_TGZ[darwin-amd64]='darwin.*amd64.*\.tar\.gz$'
+          REGEX_ZIP[darwin-amd64]='darwin.*amd64.*\.zip$'
+
+          BIN[darwin-arm64]='sing-box'
+          OUT[darwin-arm64]='Singboxcore/cores/darwin-arm64/sing-box'
+          REGEX_TGZ[darwin-arm64]='darwin.*(arm64|aarch64).*\.tar\.gz$'
+          REGEX_ZIP[darwin-arm64]='darwin.*(arm64|aarch64).*\.zip$'
+
+          BIN[windows-amd64]='sing-box.exe'
+          OUT[windows-amd64]='Singboxcore/cores/windows-amd64/sing-box.exe'
+          REGEX_TGZ[windows-amd64]='windows.*amd64.*\.tar\.gz$'
+          REGEX_ZIP[windows-amd64]='windows.*amd64.*\.zip$'
+
+          BIN[windows-arm64]='sing-box.exe'
+          OUT[windows-arm64]='Singboxcore/cores/windows-arm64/sing-box.exe'
+          REGEX_TGZ[windows-arm64]='windows.*(arm64|aarch64).*\.tar\.gz$'
+          REGEX_ZIP[windows-arm64]='windows.*(arm64|aarch64).*\.zip$'
+
+          rm -rf tmp && mkdir -p tmp
+
+          pick_url() {
+            local tgz="$1"
+            local zip="$2"
+            local u=""
+            u="$(jq -r --arg re "$tgz" '.assets[] | select(.name|test($re)) | .browser_download_url' release.json | head -n 1)"
+            if [[ -z "$u" || "$u" == "null" ]]; then
+              u="$(jq -r --arg re "$zip" '.assets[] | select(.name|test($re)) | .browser_download_url' release.json | head -n 1)"
+            fi
+            echo "$u"
+          }
+
+          for id in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64 windows-arm64; do
+            echo "Updating $id"
+            rm -rf tmp/* && mkdir -p tmp
+
+            url="$(pick_url "${REGEX_TGZ[$id]}" "${REGEX_ZIP[$id]}")"
+            [[ -z "$url" || "$url" == "null" ]] && (echo "Asset not found for $id"; exit 1)
+
+            if [[ "$url" =~ \.zip$ ]]; then
+              curl -fL "$url" -o tmp/core.zip
+              unzip -o tmp/core.zip -d tmp/unz
+              bin="$(find tmp/unz -type f -name "${BIN[$id]}" | head -n 1)"
+            else
+              curl -fL "$url" -o tmp/core.tgz
+              tar -xzf tmp/core.tgz -C tmp
+              bin="$(find tmp -type f -name "${BIN[$id]}" | head -n 1)"
+            fi
+
+            [[ -z "$bin" ]] && (echo "Binary not found"; exit 1)
+
+            mkdir -p "$(dirname "${OUT[$id]}")"
+            install -m 0755 "$bin" "${OUT[$id]}"
+          done
+
+          echo "${{ steps.rel.outputs.tag }}" > Singboxcore/VERSION
+
+      - name: Commit & push
+        if: steps.rel.outputs.need == 'true'
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email github-actions[bot]@users.noreply.github.com
+          git add Singboxcore
+          git commit -m "chore(sing-box): update to ${{ steps.rel.outputs.tag }}" || exit 0
+          git pull --rebase origin main
+          git push
