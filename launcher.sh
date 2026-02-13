@@ -1,131 +1,207 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
-SELF_NAME="$(basename "$0")"
-GLOB_PATTERN="*.sh"
+# =========  UI  =========
+RED='\033[0;31m'
+GRN='\033[0;32m'
+YEL='\033[0;33m'
+BLU='\033[0;34m'
+CYN='\033[0;36m'
+NC='\033[0m'
 
-# 颜色（终端支持就显示）
-if [[ -t 1 ]]; then
-  RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[0;33m'
-  BLUE=$'\033[0;34m'; MAGENTA=$'\033[0;35m'; CYAN=$'\033[0;36m'
-  BOLD=$'\033[1m'; DIM=$'\033[2m'; RESET=$'\033[0m'
-else
-  RED=""; GREEN=""; YELLOW=""; BLUE=""; MAGENTA=""; CYAN=""; BOLD=""; DIM=""; RESET=""
-fi
-
-hr() { printf "%s\n" "------------------------------------------------------------"; }
+hr() { printf "${CYN}------------------------------------------------------------${NC}\n"; }
+title() {
+  clear || true
+  hr
+  printf "${BLU}  BootDeploy 主菜单${NC}\n"
+  printf "  路径：%s\n" "$(pwd)"
+  hr
+}
 pause() { read -r -p "按回车继续..." _; }
 
-get_desc() {
-  local file="$1"
-  local desc=""
-  desc="$(grep -m1 -E '^[[:space:]]*#\s*DESC:' "$file" 2>/dev/null | sed -E 's/^[[:space:]]*#\s*DESC:\s*//')"
-  [[ -n "${desc:-}" ]] && echo "$desc" || echo "（无描述，可在脚本里加：# DESC: ...）"
+need_root() {
+  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    printf "${YEL}提示：建议使用 root 运行（否则安装/卸载可能失败）。${NC}\n"
+    printf "你可以用：sudo bash launcher.sh\n"
+    pause
+  fi
 }
 
-# ✅ 不用 < <(...)，避免 /dev/fd 依赖
-load_scripts() {
-  SCRIPTS=()
-  # 用 find + sort，然后 while read 收集到数组
-  # -print0 / read -d '' 更安全（文件名含空格），但 mac 的 bash 3.2 对 read -d 支持也OK
-  while IFS= read -r script; do
-    [[ "$script" == "$SELF_NAME" ]] && continue
-    SCRIPTS+=("$script")
-  done < <(find "$SCRIPTS_DIR" -maxdepth 1 -type f -name "$GLOB_PATTERN" -printf "%f\n" 2>/dev/null | sort)
-
-  # 如果你的环境 find 不支持 -printf（比如 macOS 默认 find），用下面替代（取消注释即可）：
-  # while IFS= read -r path; do
-  #   script="$(basename "$path")"
-  #   [[ "$script" == "$SELF_NAME" ]] && continue
-  #   SCRIPTS+=("$script")
-  # done < <(find "$SCRIPTS_DIR" -maxdepth 1 -type f -name "$GLOB_PATTERN" 2>/dev/null | sort)
+# =========  helper  =========
+script_dir() {
+  cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
 }
 
-run_script() {
-  local script="$1"
-  local path="$SCRIPTS_DIR/$script"
+# 在多个可能的目录名里找 install.sh（兼容你现有的拼写）
+find_install_sh() {
+  local candidates=("$@")
+  local base
+  base="$(script_dir)"
+  for d in "${candidates[@]}"; do
+    if [[ -f "$base/$d/install.sh" ]]; then
+      printf "%s\n" "$base/$d/install.sh"
+      return 0
+    fi
+  done
+  return 1
+}
 
-  if [[ ! -f "$path" ]]; then
-    echo "${RED}❌ 找不到脚本：$path${RESET}"
+run_install() {
+  local name="$1"; shift
+  local path
+  if ! path="$(find_install_sh "$@")"; then
+    printf "${RED}❌ 未找到 ${name} 的 install.sh。请确认目录存在且包含 install.sh${NC}\n"
+    hr
+    printf "我尝试过这些路径：\n"
+    for d in "$@"; do printf "  - %s/install.sh\n" "$d"; done
+    hr
+    pause
     return 1
   fi
 
-  # 自动加执行权限（对本次运行有效；要持久化到 Git 需要 git update-index）
-  if [[ ! -x "$path" ]]; then
-    chmod +x "$path" || true
-  fi
-
-  echo "${CYAN}▶ 执行：${BOLD}$script${RESET}"
-  echo "${DIM}路径：$path${RESET}"
+  title
+  printf "${GRN}▶ 开始：%s${NC}\n" "$name"
+  printf "使用脚本：%s\n" "$path"
   hr
+  chmod +x "$path" || true
+  # shellcheck disable=SC1090
   bash "$path"
   hr
-  echo "${GREEN}✅ 完成：$script${RESET}"
+  printf "${GRN}✅ 完成：%s${NC}\n" "$name"
+  pause
 }
 
-run_all() {
-  echo "${MAGENTA}${BOLD}▶ 顺序执行全部脚本${RESET}"
-  hr
-  for s in "${SCRIPTS[@]}"; do
-    run_script "$s"
-  done
-  echo "${GREEN}${BOLD}✅ 全部执行完成${RESET}"
-}
+# =========  uninstall / restore  =========
+stop_disable_service() {
+  local svc="$1"
 
-while true; do
-  load_scripts
-  clear
-
-  echo "${BOLD}${BLUE}╔══════════════════════════════════════════════════════════╗${RESET}"
-  echo "${BOLD}${BLUE}║                     主菜单 Script Hub                   ║${RESET}"
-  echo "${BOLD}${BLUE}╚══════════════════════════════════════════════════════════╝${RESET}"
-  echo "${DIM}目录：$SCRIPTS_DIR${RESET}"
-  hr
-
-  if (( ${#SCRIPTS[@]} == 0 )); then
-    echo "${YELLOW}⚠️ 当前目录没有可执行脚本（*.sh）。${RESET}"
-    hr
-    echo "0) 退出"
-    read -r -p "请输入选项: " choice
-    [[ "$choice" == "0" ]] && exit 0
-    continue
+  # systemd
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl stop "$svc" >/dev/null 2>&1 || true
+    systemctl disable "$svc" >/dev/null 2>&1 || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
   fi
 
-  for i in "${!SCRIPTS[@]}"; do
-    idx=$((i+1))
-    script="${SCRIPTS[$i]}"
-    desc="$(get_desc "$SCRIPTS_DIR/$script")"
-    printf "%s%2d)%s %s%s%s\n" "$CYAN" "$idx" "$RESET" "$BOLD" "$script" "$RESET"
-    printf "    %s%s%s\n" "$DIM" "$desc" "$RESET"
-  done
+  # openrc
+  if command -v rc-service >/dev/null 2>&1; then
+    rc-service "$svc" stop >/dev/null 2>&1 || true
+  fi
+  if command -v rc-update >/dev/null 2>&1; then
+    rc-update del "$svc" default >/dev/null 2>&1 || true
+  fi
+}
 
+remove_files() {
+  # 只清理常见路径：你可以按自己实际安装路径再加
+  rm -f  /usr/local/bin/xray /usr/bin/xray /bin/xray 2>/dev/null || true
+  rm -f  /usr/local/bin/sing-box /usr/bin/sing-box /bin/sing-box 2>/dev/null || true
+
+  rm -f  /etc/systemd/system/xray.service /etc/systemd/system/sing-box.service 2>/dev/null || true
+  rm -f  /lib/systemd/system/xray.service /lib/systemd/system/sing-box.service 2>/dev/null || true
+
+  rm -f  /etc/init.d/xray /etc/init.d/sing-box 2>/dev/null || true
+
+  rm -rf /etc/xray /etc/sing-box 2>/dev/null || true
+  rm -rf /var/log/xray /var/log/sing-box 2>/dev/null || true
+  rm -rf /var/lib/xray /var/lib/sing-box 2>/dev/null || true
+}
+
+uninstall_xray_singbox() {
+  title
+  need_root
+  printf "${YEL}⚠️ 将卸载：Xray / sing-box（仅清理常见安装项）${NC}\n"
+  printf "会尝试停止服务、删除二进制、删除配置目录。\n"
   hr
-  echo "a) 全部顺序执行"
-  echo "r) 刷新脚本列表"
-  echo "0) 退出"
+  read -r -p "确认继续卸载？(y/N): " yn
+  if [[ "${yn,,}" != "y" ]]; then
+    printf "已取消。\n"
+    pause
+    return 0
+  fi
+
+  stop_disable_service "xray" || true
+  stop_disable_service "sing-box" || true
+  remove_files
+
+  printf "${GRN}✅ 卸载/清理完成。${NC}\n"
+  pause
+}
+
+restore_vps_soft() {
+  title
+  need_root
+  printf "${RED}⚠️ 还原 VPS（安全版）${NC}\n"
+  printf "这个“还原”不会重装系统，只会：\n"
+  printf "  - 停止/禁用 xray、sing-box 服务\n"
+  printf "  - 删除 xray、sing-box 二进制/配置/日志（常见路径）\n"
+  printf "  - 不会删除你的其它程序/用户/系统文件\n"
   hr
+  read -r -p "确认执行“安全还原”？(y/N): " yn
+  if [[ "${yn,,}" != "y" ]]; then
+    printf "已取消。\n"
+    pause
+    return 0
+  fi
 
-  read -r -p "请输入选项（数字/a/r/0）: " choice
+  stop_disable_service "xray" || true
+  stop_disable_service "sing-box" || true
+  remove_files
 
-  case "$choice" in
-    0) echo "👋 已退出"; exit 0 ;;
-    a|A) run_all; pause ;;
-    r|R) continue ;;
-    *)
-      if [[ "$choice" =~ ^[0-9]+$ ]]; then
-        n="$choice"
-        if (( n >= 1 && n <= ${#SCRIPTS[@]} )); then
-          run_script "${SCRIPTS[$((n-1))]}"
-          pause
-        else
-          echo "${RED}❌ 无效编号：$choice${RESET}"
-          pause
-        fi
-      else
-        echo "${RED}❌ 无效输入：$choice${RESET}"
+  printf "${GRN}✅ 安全还原完成。${NC}\n"
+  pause
+}
+
+# =========  menu  =========
+menu() {
+  title
+  printf "${CYN}请选择：${NC}\n"
+  printf "  ${GRN}1.${NC} AlpineXray 安装\n"
+  printf "  ${GRN}2.${NC} Alpine sing-box 安装\n"
+  printf "  ${GRN}3.${NC} DebianXray 安装\n"
+  printf "  ${GRN}4.${NC} Debian sing-box 安装\n"
+  printf "  ${YEL}5.${NC} 一键卸载 Xray/sing-box\n"
+  printf "  ${RED}6.${NC} 还原 VPS（安全清理版）\n"
+  printf "  ${BLU}0.${NC} 退出\n"
+  hr
+}
+
+main() {
+  while true; do
+    menu
+    read -r -p "输入选项: " choice
+    case "$choice" in
+      1)
+        run_install "AlpineXray 安装" \
+          "AlpineXray" "ApineXray" "Alpine/Xray" "AlpineXrayCore"
+        ;;
+      2)
+        run_install "Alpine sing-box 安装" \
+          "Alpinesing-box" "Aplinesingbox" "AlpineSingbox" "Alpine/sing-box" "Alpine/singbox"
+        ;;
+      3)
+        run_install "DebianXray 安装" \
+          "DebianXray" "DebainXray" "Debian/Xray"
+        ;;
+      4)
+        run_install "Debian sing-box 安装" \
+          "Debiansing-box" "DebainSingbox" "DebianSingbox" "Debian/sing-box" "Debian/singbox"
+        ;;
+      5)
+        uninstall_xray_singbox
+        ;;
+      6)
+        restore_vps_soft
+        ;;
+      0|q|quit|exit)
+        printf "Bye.\n"
+        exit 0
+        ;;
+      *)
+        printf "${RED}无效选项：%s${NC}\n" "$choice"
         pause
-      fi
-      ;;
-  esac
-done
+        ;;
+    esac
+  done
+}
+
+main
